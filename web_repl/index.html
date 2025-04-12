@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=0.8">
+    <title>FP REPL</title>
+    <script src="wasm_exec.js"></script>
+    <style id="style-block">
+        body {
+            background-color: #f0f4f8; /* Light gray background */
+            color: #333; /* Dark text for readability */
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #repl-container {
+            width: 90%;
+            max-width: 800px;
+            min-width: 400px;
+            padding: 20px;
+            background-color: #ffffff; /* White background for the REPL */
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); /* Subtle shadow */
+            display: flex;
+            flex-direction: column;
+            height: 80vh;
+        }
+
+        #output {
+            flex-grow: 1;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-size: 14px;
+            padding: 12px;
+            background-color: #f9f9f9; /* Light gray background for output */
+            border-radius: 4px;
+            margin-bottom: 10px;
+            color: #444; /* Darker text for output */
+            word-wrap: break-word;
+        }
+
+        .input-line {
+            display: flex;
+            align-items: center;
+        }
+
+        #prompt {
+            color: #5a9dff; /* Soft blue for the prompt */
+        }
+
+        #input {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #333; /* Dark text */
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            width: 100%;
+            height: 20px;
+            resize: none; /* Disable resizing */
+            overflow: hidden; /* Hide overflow */
+        }
+
+        #input:focus {
+            outline: none;
+        }
+
+        #copy-button {
+            background-color: #a0c4ff; /* Soft blue button */
+            color: #333;
+            border: none;
+            padding: 10px;
+            font-size: 14px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        #copy-button:hover {
+            background-color: #82aaff; /* Slightly darker blue on hover */
+        }
+
+        #clear-buffer-button {
+            background-color: #a0c4ff; /* Soft blue button */
+            color: #333;
+            border: none;
+            padding: 10px;
+            font-size: 14px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        #clear-buffer-button:hover {
+            background-color: #82aaff; /* Slightly darker blue on hover */
+        }
+        #toggle-css-button {
+            background-color: #a0c4ff; /* Soft blue button */
+            color: #333;
+            border: none;
+            padding: 10px;
+            font-size: 14px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        #toggle-css-button:hover {
+            background-color: #82aaff; /* Slightly darker blue on hover */
+        }
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 14px;
+            background-color: #333; /* Dark cursor */
+            margin-left: 2px;
+            animation: blink 1s steps(2, start) infinite;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        #output-title {
+            color: #5a9dff; /* Soft blue title */
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="repl-container">
+    <div id="output-title"><h3>FP REPL </h3>
+        </div> <!-- Title for the output text -->
+    <i>
+        this is an experimental REPL for FP
+        - a go version is <a href="https://github.com/nextbite12302/fp/blob/master/cmd/repl/main.go"> here </a>
+    </i>
+    <div id="output"></div>
+    <div class="input-line">
+        <span id="prompt">>>> </span>
+        <textarea id="input" autofocus autocomplete="off"></textarea>
+        <span class="cursor"></span>
+    </div>
+    <button id="copy-button">copy all</button>
+    <button id="clear-buffer-button">clear parser buffer (simulate control + c)</button>
+    <button id="toggle-css-button">toggle css</button> <!-- Button to toggle CSS -->
+</div>
+
+<script>
+    if (WebAssembly) {
+        const go = new Go();
+        WebAssembly.instantiateStreaming(fetch("main.wasm"), go.importObject).then((result) => {
+            go.run(result.instance);
+
+            // Optional: You can call the Go function that sends data automatically
+            // window.sendOutputToWeb(); // Uncomment this if you want to trigger it manually
+        });
+    } else {
+        console.log("WebAssembly is not supported in your browser");
+    }
+
+    // JavaScript function to update the output area with content
+    function updateOutput(outputText) {
+        const outputEl = document.getElementById("output");
+        outputEl.innerHTML += `<div>${outputText}</div>`;
+        outputEl.scrollTop = outputEl.scrollHeight;
+    }
+
+    // Copy all output to clipboard
+    document.getElementById("copy-button").addEventListener("click", () => {
+        const outputEl = document.getElementById("output");
+        const range = document.createRange();
+        range.selectNodeContents(outputEl);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand('copy');
+    });
+
+    // Clear buffer
+    document.getElementById("clear-buffer-button").addEventListener("click", () => {
+        // Clear the output in the web UI
+        // outputEl.innerHTML = "";
+
+        // Call the Go function to clear the buffer
+        if (window.clearBuffer) {
+            window.clearBuffer();
+        }
+    });
+
+    // Function to handle user input
+    const outputEl = document.getElementById("output");
+    const inputEl = document.getElementById("input");
+    let history = [];
+    let historyIndex = -1;
+
+    function runREPL() {
+        const input = inputEl.value.trim();
+        if (!input) return;
+
+        history.push(input);
+        historyIndex = history.length;
+
+        // Call the Go function to evaluate input
+        const result = window.evaluate(input); // Correct way to call Go function from JavaScript
+        outputEl.innerHTML += `<div>>> ${input}</div><div>${result}</div>`;
+        outputEl.scrollTop = outputEl.scrollHeight;
+
+        inputEl.value = "";
+        inputEl.style.height = "20px"; // Reset textarea height after each input
+    }
+
+    inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();  // Prevent default Enter behavior (new line)
+            runREPL();           // Trigger REPL evaluation
+        } else if (e.key === "Enter" && e.shiftKey) {
+            // Allow multi-line input (adjust height)
+            inputEl.style.height = inputEl.scrollHeight + "px";
+        } else if (e.key === "ArrowUp" && historyIndex > 0) {
+            historyIndex--; // Move up in the history
+            inputEl.value = history[historyIndex];
+        } else if (e.key === "ArrowDown" && historyIndex < history.length - 1) {
+            historyIndex++; // Move down in the history
+            inputEl.value = history[historyIndex] || "";
+        }
+    });
+
+    // Toggle CSS on and off
+    document.getElementById("toggle-css-button").addEventListener("click", () => {
+        const styleBlock = document.getElementById("style-block");
+        if (styleBlock.disabled) {
+            styleBlock.disabled = false; // Enable CSS
+        } else {
+            styleBlock.disabled = true;  // Disable CSS
+        }
+    });
+</script>
+
+</body>
+</html>

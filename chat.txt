@@ -1,0 +1,1198 @@
+below is the readme and implementation of a simple functional programming language
+./pkg/fp/runtime_objects.go
+package fp
+
+import (
+	"context"
+	"fmt"
+)
+
+// types - TODO implement custom data types like Int, List, Dict
+
+// Object : union - TODO : introduce new data types
+type Object interface {
+	String() string
+	MustTypeObject() // for type-safety every Object must implement this
+}
+
+func getType(o Object) String {
+	switch o.(type) {
+	case Int:
+		return "Int"
+	case String:
+		return "String"
+	case Lambda:
+		return "Lambda"
+	case Module:
+		return "Module"
+	case List:
+		return "List"
+	case Dict:
+		return "Dict"
+	case Wildcard:
+		return "Wildcard"
+	case Unwrap:
+		// unfortunately, one cannot use (type *) to get the type if unwrap since it will try to replace unwrap the next argument
+		return "Unwrap"
+	default:
+		return "unknown"
+	}
+}
+
+type Int int
+
+func (i Int) String() string {
+	return fmt.Sprintf("%d", i)
+}
+
+func (i Int) MustTypeObject() {}
+
+type Dict map[Object]Object
+
+func (d Dict) String() string {
+
+	s := ""
+	s += "{"
+	for k, v := range d {
+		s += fmt.Sprintf("%s -> %s,", k.String(), v.String())
+	}
+	s += "}"
+	return s
+}
+
+func (d Dict) MustTypeObject() {}
+
+type Unwrap struct{}
+
+func (u Unwrap) String() string {
+	return "*"
+}
+
+func (u Unwrap) MustTypeObject() {}
+
+type Wildcard struct{}
+
+func (w Wildcard) String() string {
+	return "_"
+}
+
+func (w Wildcard) MustTypeObject() {}
+
+type String string
+
+func (s String) String() string {
+	return string(s)
+}
+
+func (s String) MustTypeObject() {}
+
+type Lambda struct {
+	Params []String `json:"params,omitempty"`
+	Impl   Expr     `json:"impl,omitempty"`
+	Frame  Frame    `json:"frame,omitempty"`
+}
+
+func (l Lambda) String() string {
+	s := "(lambda "
+	for _, param := range l.Params {
+		s += param.String() + " "
+	}
+	s += l.Impl.String()
+	s += ")"
+	return s
+}
+
+func (l Lambda) MustTypeObject() {}
+
+type Module struct {
+	Name String `json:"name,omitempty"`
+	Exec func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error)
+	Man  string `json:"man,omitempty"`
+}
+
+func (m Module) String() string {
+	return m.Man
+}
+
+func (m Module) MustTypeObject() {}
+
+type List []Object
+
+func (l List) String() string {
+	s := ""
+	s += "["
+	for _, obj := range l {
+		s += fmt.Sprintf("%v,", obj)
+	}
+	s += "]"
+	return s
+}
+
+func (l List) MustTypeObject() {}
+./pkg/fp/runtime.go
+package fp
+
+import (
+	"encoding/json"
+	"errors"
+	"strconv"
+)
+
+// NewCoreRuntime - runtime + core control flow extensions
+func NewCoreRuntime() *Runtime {
+	return (&Runtime{
+		parseLiteral: func(lit String) (Object, error) {
+			if len(lit) == 0 {
+				return nil, errors.New("empty literal")
+			}
+			if lit == "_" {
+				return Wildcard{}, nil
+			}
+			if lit == "*" {
+				return Unwrap{}, nil
+			}
+			if lit[0] == '"' && lit[len(lit)-1] == '"' {
+				str := ""
+				if err := json.Unmarshal([]byte(lit), &str); err != nil {
+					return nil, err
+				}
+				return String(str), nil
+			}
+			i, err := strconv.Atoi(lit.String())
+			return Int(i), err
+		},
+		Stack: []Frame{
+			make(Frame),
+		},
+	}).
+		LoadModule(letModule).
+		LoadModule(delModule).
+		LoadModule(lambdaModule).
+		LoadModule(caseModule)
+}
+
+// NewBasicRuntime : NewCoreRuntime + minimal set of arithmetic extensions for Turing completeness
+func NewBasicRuntime() *Runtime {
+	return NewCoreRuntime().
+		LoadExtension(tailExtension).
+		LoadExtension(addExtension).
+		LoadExtension(subExtension).
+		LoadExtension(signExtension)
+}
+
+// NewStdRuntime : NewCoreRuntime + standard functions
+func NewStdRuntime() *Runtime {
+	return NewBasicRuntime().
+		LoadExtension(mulExtension).
+		LoadExtension(divExtension).
+		LoadExtension(modExtension).
+		LoadExtension(printExtension).
+		LoadExtension(listExtension).
+		LoadExtension(appendExtension).
+		LoadExtension(sliceExtension).
+		LoadExtension(peekExtension).
+		LoadExtension(lenExtension).
+		LoadModule(mapModule).
+		LoadExtension(typeExtension).
+		LoadModule(stackModule).
+		LoadModule(kaboomModule).
+		LoadExtension(doomExtension).
+		LoadExtension(timeExtension).
+		LoadExtension(rangeExtension)
+}
+./pkg/fp/lexer.go
+package fp
+
+import (
+	"fmt"
+	"strings"
+	"unicode"
+)
+
+type Token = string
+
+func removeComments(str string) string {
+	lines := strings.Split(str, "\n")
+	var newLines []string
+	for _, line := range lines {
+		newLines = append(newLines, strings.Split(line, "//")[0])
+	}
+	return strings.Join(newLines, "\n")
+}
+
+func Tokenize(str string) []Token {
+	str = removeComments(str)
+
+	const (
+		STATE_OUTSTRING = iota
+		STATE_INSTRING
+		STATE_INSTRING_ESCAPE
+	)
+
+	var tokens []Token
+	state := STATE_OUTSTRING
+	buffer := ""
+	flushBuffer := func() {
+		if len(buffer) > 0 {
+			tokens = append(tokens, buffer)
+		}
+		buffer = ""
+	}
+	for _, ch := range str {
+		switch state {
+		case STATE_OUTSTRING:
+			if unicode.IsSpace(ch) {
+				flushBuffer()
+			} else if ch == '(' || ch == ')' || ch == '*' {
+				flushBuffer()
+				buffer += string(ch)
+				flushBuffer()
+			} else if ch == '"' {
+				flushBuffer()
+				buffer += string(ch)
+				state = STATE_INSTRING
+			} else {
+				buffer += string(ch)
+			}
+		case STATE_INSTRING:
+			if ch == '\\' {
+				buffer += string(ch)
+				state = STATE_INSTRING_ESCAPE
+			} else if ch == '"' {
+				buffer += string(ch)
+				flushBuffer()
+				state = STATE_OUTSTRING
+			} else {
+				buffer += string(ch)
+			}
+		case STATE_INSTRING_ESCAPE:
+			buffer += string(ch)
+			state = STATE_INSTRING
+		default:
+			panic(fmt.Sprintf("invalid state: %d", state))
+		}
+	}
+	flushBuffer()
+	return tokens
+}
+./pkg/fp/parser.go
+package fp
+
+import (
+	"errors"
+)
+
+// Expr : union of NameExpr, LambdaExpr
+type Expr interface {
+	String() string
+	MustTypeExpr() // for type-safety every Expr must implement this
+}
+
+type NameExpr string
+
+func (e NameExpr) String() string {
+	return string(e)
+}
+
+func (e NameExpr) MustTypeExpr() {
+}
+
+// LambdaExpr : S-expression
+type LambdaExpr struct {
+	Name NameExpr
+	Args []Expr
+}
+
+func (e LambdaExpr) String() string {
+	s := ""
+	s += "("
+	s += e.Name.String()
+	for _, arg := range e.Args {
+		s += " " + arg.String()
+	}
+	s += ")"
+	return s
+}
+
+func (e LambdaExpr) MustTypeExpr() {
+
+}
+
+func pop(tokenList []Token) ([]Token, Token, error) {
+	if len(tokenList) == 0 {
+		return nil, "", errors.New("empty token list")
+	}
+	return tokenList[1:], tokenList[0], nil
+}
+
+// ParseAll : parse a token list
+func ParseAll(tokenList []Token) ([]Expr, []Token) {
+	var expr Expr
+	var exprList []Expr
+	var err error
+	for len(tokenList) > 0 {
+		expr, tokenList, err = parseSingle(tokenList)
+		if err != nil {
+			panic(err)
+		}
+		exprList = append(exprList, expr)
+	}
+	return exprList, tokenList
+}
+
+type Parser struct {
+	Buffer []Token
+}
+
+func (p *Parser) Clear() {
+	p.Buffer = []Token{}
+}
+
+func (p *Parser) Input(tok Token) Expr {
+	p.Buffer = append(p.Buffer, tok)
+	// try parse single // TODO : do this for simplicity
+	buffer := append([]Token(nil), p.Buffer...) // copy
+	expr, buffer, err := parseSingle(buffer)
+	if err != nil {
+		// parse fail - don't do anything
+		return nil
+	} else {
+		// parse ok - update buffer
+		p.Buffer = buffer
+		return expr
+	}
+}
+
+func parseSingle(tokenList []Token) (Expr, []Token, error) {
+	var parse func(tokenList []Token) (Expr, []Token, bool, error)
+	parse = func(tokenList []Token) (Expr, []Token, bool, error) {
+		if len(tokenList) == 0 {
+			return nil, nil, false, errors.New("empty token list")
+		}
+		tokenList, head, err := pop(tokenList) // pop ( or [ or name
+		if err != nil {
+			return nil, nil, false, err
+		}
+		switch head {
+		case "(": // start with Open
+			tokenList, funcName, err := pop(tokenList)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if funcName == ")" { // empty
+				return parse(tokenList)
+			}
+			var expr Expr
+			var exprList []Expr
+			var endWithClose bool
+			for {
+				expr, tokenList, endWithClose, err = parse(tokenList)
+				if err != nil {
+					return nil, nil, false, err
+				}
+				if endWithClose {
+					// end with Close
+					break
+				}
+				exprList = append(exprList, expr)
+			}
+			return LambdaExpr{
+				Name: NameExpr(funcName),
+				Args: exprList,
+			}, tokenList, false, nil
+		default:
+			return NameExpr(head), tokenList, head == ")", nil
+		}
+	}
+
+	expr, tokenList, endWithClose, err := parse(tokenList)
+	if err != nil {
+		return nil, nil, err
+	}
+	if endWithClose {
+		return nil, nil, errors.New("parse error")
+	}
+	return expr, tokenList, nil
+}
+./pkg/fp/runtime_module.go
+package fp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+type Extension struct {
+	Name String
+	Exec func(ctx context.Context, values ...Object) (Object, error)
+	Man  string
+}
+
+func makeModuleFromExtension(e Extension) Module {
+	return Module{
+		Name: e.Name,
+		Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+			args, err := r.stepMany(ctx, expr.Args...)
+			if err != nil {
+				return nil, err
+			}
+			var unwrappedArgs []Object
+			i := 0
+			for i < len(args) {
+				if _, ok := args[i].(Unwrap); ok {
+					if i+1 >= len(args) {
+						return nil, errors.New("unwrapping arguments must be a list")
+					}
+					argsList, ok := args[i+1].(List)
+					if !ok {
+						return nil, errors.New("unwrapping arguments must be a list")
+					}
+					for _, elem := range argsList {
+						unwrappedArgs = append(unwrappedArgs, elem)
+					}
+					i += 2
+				} else {
+					unwrappedArgs = append(unwrappedArgs, args[i])
+					i++
+				}
+			}
+			return e.Exec(ctx, unwrappedArgs...)
+		},
+		Man: e.Man,
+	}
+}
+
+func (r *Runtime) LoadExtension(e Extension) *Runtime {
+	return r.LoadModule(makeModuleFromExtension(e))
+}
+
+var letModule = Module{
+	Name: "let",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		if len(expr.Args) < 2 {
+			return nil, fmt.Errorf("not enough arguments for let")
+		}
+		name := String(expr.Args[0].(NameExpr))
+		outputs, err := r.stepMany(ctx, expr.Args[1:]...)
+		if err != nil {
+			return nil, err
+		}
+		r.Stack[len(r.Stack)-1][name] = outputs[len(outputs)-1]
+		return outputs[len(outputs)-1], nil
+	},
+	Man: "module: (let x 3) - assign value 3 to local variable x",
+}
+
+var delModule = Module{
+	Name: "del",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		if len(expr.Args) < 1 {
+			return nil, fmt.Errorf("not enough arguments for del")
+		}
+		name := String(expr.Args[0].(NameExpr))
+		_, err := r.stepMany(ctx, expr.Args[1:]...)
+		if err != nil {
+			return nil, err
+		}
+		delete(r.Stack[len(r.Stack)-1], name)
+		return nil, nil
+	},
+	Man: "module: (del x) - delete variable x",
+}
+
+var lambdaModule = Module{
+	Name: "lambda",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		v := Lambda{
+			Params: nil,
+			Impl:   nil,
+			Frame:  nil,
+		}
+		for i := 0; i < len(expr.Args)-1; i++ {
+			paramName := String(expr.Args[i].(NameExpr))
+			v.Params = append(v.Params, paramName)
+		}
+		v.Impl = expr.Args[len(expr.Args)-1]
+		v.Frame = make(Frame).Update(r.Stack[len(r.Stack)-1])
+		return v, nil
+	},
+	Man: "module: (lambda x y (add x y) - declare a function",
+}
+
+var caseModule = Module{
+	Name: "case",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		cond, err := r.Step(ctx, expr.Args[0])
+		if err != nil {
+			return nil, err
+		}
+		i, err := func() (int, error) {
+			for i := 1; i < len(expr.Args); i += 2 {
+				comp, err := r.Step(ctx, expr.Args[i])
+				if err != nil {
+					return 0, err
+				}
+				if _, ok := comp.(Wildcard); ok || comp == cond {
+					return i, nil
+				}
+			}
+			return 0, fmt.Errorf("runtime error: no case matched %s", expr)
+		}()
+		if err != nil {
+			return nil, err
+		}
+		return r.Step(ctx, expr.Args[i+1])
+	},
+	Man: "module: (case x 1 2 4 5) - case, if x=1 then return 3, if x=4 the return 5",
+}
+
+var kaboomModule = Module{
+	Name: "kaboom",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		r.Stack = r.Stack[0:1]
+		return nil, nil
+	},
+	Man: "module: (kaboom) - remove everything except global frame",
+}
+
+var doomExtension = Extension{
+	Name: "doom",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		return String(fmt.Sprintf("i told you - we don't have Doom yet")), nil
+	},
+	Man: "module: (doom) - extra modules required https://youtu.be/dQw4w9WgXcQ",
+}
+
+var tailExtension = Extension{
+	Name: "tail",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		return values[len(values)-1], nil
+	},
+	Man: "module: (tail (print 1) (print 2) 3) - exec a sequence of expressions and return the last one",
+}
+
+var addExtension = Extension{
+	Name: "add",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		var sum Int = 0
+		for i := 0; i < len(values); i++ {
+			v, ok := values[i].(Int)
+			if !ok {
+				return nil, fmt.Errorf("adding non-integer values")
+			}
+			sum += v
+		}
+		return sum, nil
+	},
+	Man: "module: (add 1 (add 2 3) 3) - exec a sequence of expressions and return the sum",
+}
+
+var mulExtension = Extension{
+	Name: "mul",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		var sum Int = 1
+		for i := 0; i < len(values); i++ {
+			v, ok := values[i].(Int)
+			if !ok {
+				return nil, fmt.Errorf("multiplying non-integer values")
+			}
+			sum *= v
+		}
+		return sum, nil
+	},
+	Man: "module: (mul 1 (add 2 3) 3) - exec a sequence of expressions and return the product",
+}
+
+var subExtension = Extension{
+	Name: "sub",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) != 2 {
+			return nil, fmt.Errorf("subtract requires 2 arguments")
+		}
+		a, ok := values[0].(Int)
+		if !ok {
+			return nil, fmt.Errorf("subtract non-integer value")
+		}
+		b, ok := values[1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("subtract non-integer value")
+		}
+		return a - b, nil
+	},
+	Man: "module: (sub 2 (add 1 1)) - exec two expressions and return difference",
+}
+
+var divExtension = Extension{
+	Name: "div",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) != 2 {
+			return nil, fmt.Errorf("dividing requires 2 arguments")
+		}
+		a, ok := values[0].(Int)
+		if !ok {
+			return nil, fmt.Errorf("dividing non-integer value")
+		}
+		b, ok := values[1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("dividing non-integer value")
+		}
+		if b == 0 {
+			return nil, fmt.Errorf("division by zero")
+		}
+		return a / b, nil
+	},
+	Man: "module: (div 2 (add 1 1)) - exec two expressions and return ratio",
+}
+
+var modExtension = Extension{
+	Name: "mod",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) != 2 {
+			return nil, fmt.Errorf("dividing requires 2 arguments")
+		}
+		a, ok := values[0].(Int)
+		if !ok {
+			return nil, fmt.Errorf("dividing non-integer value")
+		}
+		b, ok := values[1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("dividing non-integer value")
+		}
+		if b == 0 {
+			return nil, fmt.Errorf("division by zero")
+		}
+		return a % b, nil
+	},
+	Man: "module: (mod 2 (add 1 1)) - exec two expressions and return modulo",
+}
+
+var signExtension = Extension{
+	Name: "sign",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		v, ok := values[len(values)-1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("sign non-integer value")
+		}
+		switch {
+		case v > 0:
+			return Int(+1), nil
+		case v < 0:
+			return Int(-1), nil
+		default:
+			return Int(0), nil
+		}
+	},
+	Man: "module: (sign 3) - exec an expression and return the sign",
+}
+
+var listExtension = Extension{
+	Name: "list",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		var l List
+		for _, v := range values {
+			l = append(l, v)
+		}
+		return l, nil
+	},
+	Man: "module: (list 1 2 (lambda x (add x 1))) - make a list",
+}
+
+var appendExtension = Extension{
+	Name: "append",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		l, ok := values[0].(List)
+		if !ok {
+			return nil, fmt.Errorf("first argument must be list")
+		}
+		return append(l, values[1:]...), nil
+	},
+	Man: "module: (append l 2 (add 1 1)) - append elements into list l and return a new list",
+}
+
+var sliceExtension = Extension{
+	Name: "slice",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) != 3 {
+			return nil, fmt.Errorf("slice requires 3 arguments")
+		}
+		l, ok := values[0].(List)
+		if !ok {
+			return nil, fmt.Errorf("first argument must be list")
+		}
+		if len(l) < 1 {
+			return nil, fmt.Errorf("empty list")
+		}
+		i, ok := values[1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("second argument must be integer")
+		}
+		j, ok := values[2].(Int)
+		if !ok {
+			return nil, fmt.Errorf("third argument must be integer")
+		}
+		length := Int(len(l))
+		if i < 1 || i > length || j < 1 || j > length {
+			return nil, fmt.Errorf("list is out of range")
+		}
+		return l[i-1 : j], nil
+	},
+	Man: "module: (slice l 2 3) - make a slice of a list l[2, 3] (list is 1-indexing and slice is a closed interval)",
+}
+
+var peekExtension = Extension{
+	Name: "peek",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) < 2 {
+			return nil, fmt.Errorf("peak requires at least 2 arguments")
+		}
+		l, ok := values[0].(List)
+		if !ok {
+			return nil, fmt.Errorf("first argument must be list")
+		}
+		length := Int(len(l))
+		if length < 1 {
+			return nil, fmt.Errorf("empty list")
+		}
+		var outputs List
+		for j := 1; j < len(values); j++ {
+			i, ok := values[j].(Int)
+			if !ok {
+				return nil, fmt.Errorf("second argument must be integer")
+			}
+			if i < 1 || i > length {
+				return nil, fmt.Errorf("list is out of range")
+			}
+			outputs = append(outputs, l[i-1])
+		}
+		if len(outputs) == 1 {
+			return outputs[0], nil
+		}
+		return outputs, nil
+	},
+	Man: "module: (peek l 3 2) - get elem from list (can get multiple elements) (list is 1-indexing)",
+}
+
+var lenExtension = Extension{
+	Name: "len",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) != 1 {
+			return nil, fmt.Errorf("len requires 1 argument")
+		}
+		switch v := values[0].(type) {
+		case List:
+			return Int(len(v)), nil
+		case Dict:
+			return Int(len(v)), nil
+		default:
+			return nil, fmt.Errorf("first argument must be list or dict")
+		}
+	},
+	Man: "module: (len l) - get length of a list of dict",
+}
+
+// mapModule - TODO make map parallel by make a copy of the latest frame, reuse other frames, call in parallel
+var mapModule = Module{
+	Name: "map",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		if len(expr.Args) != 2 {
+			return nil, fmt.Errorf("map requires 2 arguments")
+		}
+		l1, err := r.Step(ctx, expr.Args[0])
+		if err != nil {
+			return nil, err
+		}
+		l, ok := l1.(List)
+		if !ok {
+			return nil, fmt.Errorf("first argument must be list")
+		}
+		f1, err := r.Step(ctx, expr.Args[1])
+		if err != nil {
+			return nil, err
+		}
+		var outputs List
+		switch f := f1.(type) {
+		case Lambda:
+			if len(f.Params) != 1 {
+				return nil, fmt.Errorf("map function requires 1 argument")
+			}
+			for _, v := range l {
+				// 2. add argument to local Frame
+				localFrame := make(Frame).Update(f.Frame)
+				localFrame[f.Params[0]] = v
+				// 3. push Frame to Stack
+				r.Stack = append(r.Stack, localFrame)
+				// 4. exec function
+				o, err := r.Step(ctx, f.Impl)
+				// 5. pop Frame from Stack
+				r.Stack = r.Stack[:len(r.Stack)-1]
+				// 6. append o
+				if err != nil {
+					return nil, err
+				}
+				outputs = append(outputs, o)
+			}
+		case Module:
+			for _, v := range l {
+				// 2. add argument to local Frame
+				localFrame := make(Frame)
+				localFrame["x"] = v // dummy variable
+				// 3. make dummy expr and exec
+				o, err := f.Exec(ctx, r, LambdaExpr{
+					Name: "",
+					Args: []Expr{NameExpr("x")}, // dummy variable
+				})
+				// 5. pop Frame from Stack
+				r.Stack = r.Stack[:len(r.Stack)-1]
+				// 6. append o
+				if err != nil {
+					return nil, err
+				}
+				outputs = append(outputs, o)
+			}
+		default:
+			return nil, fmt.Errorf("runtime error: map module requires a function")
+		}
+		return outputs, nil
+	},
+	Man: "module: (map l (lambda y (add 1 y))) - map or for loop",
+}
+
+// TODO - implement map filter reduce
+
+var rangeExtension = Extension{
+	Name: "range",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		if len(values) < 2 {
+			return nil, fmt.Errorf("range requires at least 2 arguments")
+		}
+		low, ok := values[0].(Int)
+		if !ok {
+			return nil, fmt.Errorf("first argument must be integer")
+		}
+		high, ok := values[1].(Int)
+		if !ok {
+			return nil, fmt.Errorf("second argument must be integer")
+		}
+		if low > high {
+			return nil, nil
+		}
+		var list List
+		for i := low; i <= high; i++ {
+			list = append(list, i)
+		}
+		return list, nil
+	},
+	Man: "module: (range 1 10) - return [1, 2, ..., 10]",
+}
+
+var typeExtension = Extension{
+	Name: "type",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		var types List
+		for _, v := range values {
+			types = append(types, getType(v))
+		}
+		if len(types) == 1 {
+			return types[0], nil
+		}
+		return types, nil
+	},
+	Man: "module: (type x 1 (lambda y (add 1 y))) - get types of objects (can get multiple ones)",
+}
+
+var stackModule = Module{
+	Name: "stack",
+	Exec: func(ctx context.Context, r *Runtime, expr LambdaExpr) (Object, error) {
+		var stack List
+		for _, f := range r.Stack {
+			frame := make(Dict)
+			for k, v := range f {
+				frame[String(k)] = v
+			}
+			stack = append(stack, frame)
+		}
+		return stack, nil
+	},
+	Man: "module: (stack) - get stack",
+}
+
+var printExtension = Extension{
+	Name: "print",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		for _, v := range values {
+			fmt.Printf("%v ", v)
+		}
+		fmt.Println()
+		return Int(len(values)), nil
+	},
+	Man: "module: (print 1 x (lambda 3)) - print values",
+}
+
+var timeExtension = Extension{
+	Name: "time",
+	Exec: func(ctx context.Context, values ...Object) (Object, error) {
+		return Int(time.Now().UnixNano()), nil
+	},
+	Man: "(time) - get current time",
+}
+./pkg/fp/runtime_core.go
+package fp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+)
+
+type Runtime struct {
+	parseLiteral func(lit String) (Object, error)
+	Stack        []Frame `json:"stack,omitempty"`
+}
+type Frame map[String]Object
+
+func (f Frame) Update(otherFrame Frame) Frame {
+	for k, v := range otherFrame {
+		f[k] = v
+	}
+	return f
+}
+
+func (r *Runtime) LoadModule(m Module) *Runtime {
+	r.Stack[0][m.Name] = m
+	return r
+}
+
+const (
+	SIMPLE_DETECT_NONPURE = false
+	MAX_STACK_DEPTH       = 1000
+	TAILCALL_OPTIMIZATION = true
+)
+
+func (r *Runtime) searchOnStack(name String) (Object, error) {
+	for i := len(r.Stack) - 1; i >= 0; i-- {
+		if o, ok := r.Stack[i][name]; ok {
+			if SIMPLE_DETECT_NONPURE {
+				if i != 0 && i < len(r.Stack)-1 {
+					_, _ = fmt.Fprintf(os.Stderr, "non-pure function")
+				}
+			}
+			return o, nil
+		}
+	}
+	return nil, fmt.Errorf("object not found %s", name)
+}
+
+var InterruptError = errors.New("interrupt")
+var TimeoutError = errors.New("timeout")
+var StackOverflowError = errors.New("stack overflow")
+
+type stepOptions struct {
+	tailCall bool
+}
+
+func getOptionsFromContext(ctx context.Context) (*stepOptions, bool) {
+	if o, ok := ctx.Value("step_options").(*stepOptions); ok {
+		return o, true
+	}
+	// default option
+	return &stepOptions{
+		tailCall: false,
+	}, false
+}
+
+func setOptionsToContext(ctx context.Context, o *stepOptions) context.Context {
+	return context.WithValue(ctx, "step_options", o)
+}
+
+// Step -
+func (r *Runtime) Step(ctx context.Context, expr Expr) (Object, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	options, _ := getOptionsFromContext(ctx)
+
+	deadline, ok := ctx.Deadline()
+	if ok && time.Now().After(deadline) {
+		return nil, TimeoutError
+	}
+	if len(r.Stack) > MAX_STACK_DEPTH {
+		return nil, StackOverflowError
+	}
+	select {
+	case <-ctx.Done():
+		return nil, InterruptError
+	default:
+		switch expr := expr.(type) {
+		case NameExpr:
+			var v Object
+			// parse name
+			v, err := r.parseLiteral(String(expr))
+			if err == nil {
+				return v, nil
+			}
+			// find in stack for variable
+			return r.searchOnStack(String(expr))
+
+		case LambdaExpr:
+			f, err := r.searchOnStack(String(expr.Name))
+			if err != nil {
+				return nil, err
+			}
+			switch f := f.(type) {
+			case Lambda:
+				// 1. evaluate arguments
+				args, err := r.stepMany(ctx, expr.Args...)
+				if err != nil {
+					return nil, err
+				}
+				// 2. add argument to local Frame
+				localFrame := make(Frame).Update(f.Frame)
+				for i := 0; i < len(f.Params); i++ {
+					localFrame[f.Params[i]] = args[i]
+				}
+				// 3. push Frame to Stack
+				if options.tailCall {
+					r.Stack[len(r.Stack)-1].Update(localFrame)
+				} else {
+					r.Stack = append(r.Stack, localFrame)
+				}
+				// 4. exec function
+				v, err := r.Step(ctx, f.Impl)
+				if err != nil {
+					return nil, err
+				}
+				// 5. pop Frame from Stack
+				if !options.tailCall {
+					r.Stack = r.Stack[:len(r.Stack)-1]
+				}
+				return v, nil
+			case Module:
+				return f.Exec(ctx, r, expr)
+			default:
+				return nil, fmt.Errorf("function or module %s found but wrong type", expr.Name.String())
+			}
+		default:
+			return nil, fmt.Errorf("runtime error: unknown expression type")
+		}
+	}
+}
+
+func (r *Runtime) stepMany(ctx context.Context, exprList ...Expr) ([]Object, error) {
+	var outputs []Object
+	if len(exprList) != 0 {
+		for i, expr := range exprList {
+			if TAILCALL_OPTIMIZATION {
+				if i == len(exprList)-1 && len(exprList) >= 2 { // TODO somehow if exprList is of length 1 then error
+					options, found := getOptionsFromContext(ctx)
+					options.tailCall = true
+					if !found {
+						ctx = setOptionsToContext(ctx, options)
+					}
+				}
+			}
+			v, err := r.Step(ctx, expr)
+			if err != nil {
+				return nil, err
+			}
+			outputs = append(outputs, v)
+		}
+
+	}
+	return outputs, nil
+}
+./pkg/repl/repl.go
+package repl
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"fp/pkg/fp"
+	"sort"
+)
+
+type REPL interface {
+	ReplyInput(ctx context.Context, input string) (output string, executed bool)
+	ClearBuffer() (output string)
+}
+
+type fpRepl struct {
+	runtime *fp.Runtime
+	parser  *fp.Parser
+	buffer  string
+}
+
+func (r *fpRepl) ReplyInput(ctx context.Context, input string) (output string, executed bool) {
+	tokenList := fp.Tokenize(input)
+	executed = false
+	if len(tokenList) == 0 {
+		executed = true
+	} else {
+		for _, token := range tokenList {
+			expr := r.parser.Input(token)
+			if expr != nil {
+				executed = true
+
+				lastFrame := make(fp.Frame).Update(r.runtime.Stack[len(r.runtime.Stack)-1])
+				stackSize := len(r.runtime.Stack)
+				output, err := r.runtime.Step(ctx, expr)
+				if err != nil {
+					if errors.Is(err, fp.InterruptError) {
+						// reset stack size
+						r.runtime.Stack = r.runtime.Stack[:stackSize-1]
+						r.runtime.Stack = append(r.runtime.Stack, lastFrame)
+						r.writeln("interrupted - stack was recovered")
+					}
+					r.writeln(err.Error())
+					continue
+				}
+				r.write("%v\n", output)
+			}
+		}
+	}
+	return r.flush(), executed
+}
+
+func (r *fpRepl) ClearBuffer() (output string) {
+	r.parser.Clear()
+	r.writeln("(Control + C) to clear parser buffer, (Control + D) to exit")
+	return r.flush()
+}
+
+func (r *fpRepl) flush() (output string) {
+	output, r.buffer = r.buffer, ""
+	return output
+}
+
+func (r *fpRepl) write(format string, a ...interface{}) {
+	r.buffer += fmt.Sprintf(format, a...)
+}
+func (r *fpRepl) writeln(format string, a ...interface{}) {
+	r.write(format+"\n", a...)
+}
+
+func NewFP(runtime *fp.Runtime) (repl REPL, welcome string) {
+	r := &fpRepl{
+		runtime: runtime,
+		parser:  &fp.Parser{},
+		buffer:  "",
+	}
+	r.writeln("welcome to fp repl! type function or module name for help")
+	r.write("loaded modules: ")
+	var funcNameList []string
+	for k := range r.runtime.Stack[0] {
+		funcNameList = append(funcNameList, string(k))
+	}
+	sort.Strings(funcNameList)
+	for _, name := range funcNameList {
+		r.write("%s ", name)
+	}
+	r.writeln("")
+	return r, r.flush()
+}
+do you have any comment on this?
